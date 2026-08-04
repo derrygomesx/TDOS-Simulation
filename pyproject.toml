@@ -1,0 +1,101 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ==========================================================
+# Project Information
+# ==========================================================
+
+[project]
+name = "tdos-simulation"
+version = "1.0.0"
+description = "Track Digital Operations Sandbox (TDOS) - Railway Simulation Engine"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+authors = [
+    { name = "TrackGuard AI Team" }
+]
+
+keywords = [
+    "railway",
+    "simulation",
+    "digital-twin",
+    "track-monitoring",
+    "predictive-maintenance",
+    "benchmark",
+    "ai",
+    "rail-infrastructure"
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = [
+    "pydantic>=2.11.0",
+    "pydantic-settings>=2.11.0",
+    "numpy>=2.3.0",
+    "scipy>=1.16.0",
+    "pandas>=2.3.0",
+    "networkx>=3.5",
+    "orjson>=3.11.0",
+    "loguru>=0.7.3",
+    "python-dateutil>=2.9.0",
+    "typing_extensions>=4.15.0",
+]
+
+# ==========================================================
+# Package Discovery
+# ==========================================================
+
+[tool.setuptools.packages.find]
+include = ["tdos*"]
+
+# ==========================================================
+# Pytest
+# ==========================================================
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v"
+
+# ==========================================================
+# Ruff
+# ==========================================================
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+# ==========================================================
+# Black
+# ==========================================================
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+# ==========================================================
+# Coverage
+# ==========================================================
+
+[tool.coverage.run]
+source = ["tdos"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
