@@ -1,0 +1,295 @@
+"""
+Track Digital Operations Sandbox (TDOS)
+
+simulation_service.py
+
+Application service bridging the FastAPI backend and the TDOS engine.
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import RLock
+
+from database.models import SimulationModel
+from schemas.simulation import SimulationCreateRequest
+from tdos.core.engine import SimulationEngine
+
+
+class SimulationService:
+    """
+    Owns application-level TDOS simulation sessions.
+
+    Each API-created simulation receives its own SimulationEngine instance.
+    Long-running simulations execute in a worker thread so the API remains
+    responsive and lifecycle endpoints can inspect or request a pause/stop.
+    """
+
+    def __init__(self, session) -> None:
+        self._session = session
+        self._lock = RLock()
+        self._engines: dict[str, SimulationEngine] = {}
+        self._futures: dict[str, Future] = {}
+        self._executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="tdos-simulation",
+        )
+
+    # ==========================================================
+    # CREATE
+    # ==========================================================
+
+    def create(self, request: SimulationCreateRequest) -> dict:
+        engine = SimulationEngine()
+
+        simulation = engine.create_session(
+            name=request.name,
+            assets=request.assets,
+            scenarios=request.scenarios,
+            total_steps=request.total_steps,
+        )
+
+        with self._lock:
+            self._engines[simulation.simulation_id] = engine
+
+        record = SimulationModel(
+            id=simulation.simulation_id,
+            experiment_id=request.experiment_id,
+            scenario_name=", ".join(
+                scenario.name for scenario in request.scenarios
+            ) or "BASELINE",
+            status=simulation.status,
+            progress=simulation.progress,
+        )
+
+        self._session.add(record)
+        self._session.commit()
+
+        return self._serialize_status(engine)
+
+    # ==========================================================
+    # LOOKUP
+    # ==========================================================
+
+    def _get_engine(self, simulation_id: str) -> SimulationEngine:
+        with self._lock:
+            engine = self._engines.get(simulation_id)
+
+        if engine is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+
+        return engine
+
+    # ==========================================================
+    # RUN
+    # ==========================================================
+
+    def start(self, simulation_id: str) -> dict:
+        engine = self._get_engine(simulation_id)
+        session = engine.session
+
+        if session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+
+        if session.completed:
+            return self._serialize_status(engine)
+
+        future = self._futures.get(simulation_id)
+
+        if future is not None and not future.done():
+            return self._serialize_status(engine)
+
+        self._update_record(
+            simulation_id,
+            status="RUNNING",
+            progress=session.progress,
+        )
+
+        future = self._executor.submit(engine.run)
+
+        with self._lock:
+            self._futures[simulation_id] = future
+
+        return self._serialize_status(engine)
+
+    def wait(self, simulation_id: str) -> dict:
+        """Wait for a started simulation and return its final result."""
+
+        engine = self._get_engine(simulation_id)
+        future = self._futures.get(simulation_id)
+
+        if future is not None:
+            future.result()
+
+        self._sync_record(engine)
+        return self.results(simulation_id)
+
+    # ==========================================================
+    # STATUS
+    # ==========================================================
+
+    def status(self, simulation_id: str) -> dict:
+        engine = self._get_engine(simulation_id)
+        self._sync_record(engine)
+        return self._serialize_status(engine)
+
+    # ==========================================================
+    # RESULTS
+    # ==========================================================
+
+    def results(self, simulation_id: str) -> dict:
+        engine = self._get_engine(simulation_id)
+
+        if engine.session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+
+        result = engine.results()
+        self._sync_record(engine)
+
+        return result.model_dump(mode="json")
+
+    # ==========================================================
+    # CONTROL
+    # ==========================================================
+
+    def pause(self, simulation_id: str) -> dict:
+        engine = self._get_engine(simulation_id)
+        session = engine.session
+
+        if session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+
+        if session.completed:
+            return self._serialize_status(engine)
+
+        engine._session = session.model_copy(
+            update={
+                "status": "PAUSED",
+                "paused": True,
+            }
+        )
+
+        self._sync_record(engine)
+        return self._serialize_status(engine)
+
+    def resume(self, simulation_id: str) -> dict:
+        engine = self._get_engine(simulation_id)
+        session = engine.session
+
+        if session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+
+        if session.completed:
+            return self._serialize_status(engine)
+
+        engine._session = session.model_copy(
+            update={
+                "status": "RUNNING",
+                "paused": False,
+            }
+        )
+
+        future = self._futures.get(simulation_id)
+
+        if future is None or future.done():
+            future = self._executor.submit(engine.run)
+            with self._lock:
+                self._futures[simulation_id] = future
+
+        self._sync_record(engine)
+        return self._serialize_status(engine)
+
+    def stop(self, simulation_id: str) -> dict:
+        engine = self._get_engine(simulation_id)
+        session = engine.session
+
+        if session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+
+        if not session.completed:
+            engine._session = session.model_copy(
+                update={
+                    "status": "CANCELLED",
+                    "completed": True,
+                    "paused": False,
+                }
+            )
+
+        self._sync_record(engine)
+        return self._serialize_status(engine)
+
+    # ==========================================================
+    # RESET
+    # ==========================================================
+
+    def reset(self, simulation_id: str) -> dict:
+        engine = self._get_engine(simulation_id)
+
+        future = self._futures.get(simulation_id)
+        if future is not None and not future.done():
+            raise RuntimeError(
+                "Cannot reset a simulation while it is running."
+            )
+
+        engine.reset()
+        self._update_record(
+            simulation_id,
+            status="IDLE",
+            progress=0.0,
+        )
+
+        return {
+            "simulation_id": simulation_id,
+            "status": "IDLE",
+            "progress": 0.0,
+            "message": "Simulation reset.",
+        }
+
+    # ==========================================================
+    # INTERNAL
+    # ==========================================================
+
+    def _serialize_status(self, engine: SimulationEngine) -> dict:
+        status = engine.status()
+        return {
+            **status,
+            "simulation_id": (
+                engine.session.simulation_id
+                if engine.session is not None
+                else None
+            ),
+        }
+
+    def _update_record(
+        self,
+        simulation_id: str,
+        *,
+        status: str,
+        progress: float,
+    ) -> None:
+        record = (
+            self._session.query(SimulationModel)
+            .filter(SimulationModel.id == simulation_id)
+            .first()
+        )
+
+        if record is None:
+            return
+
+        record.status = status
+        record.progress = progress
+        self._session.commit()
+
+    def _sync_record(self, engine: SimulationEngine) -> None:
+        session = engine.session
+        if session is None:
+            return
+
+        self._update_record(
+            session.simulation_id,
+            status=session.status,
+            progress=session.progress,
+        )
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
