@@ -73,7 +73,7 @@ class SimulationScenario(BaseModel):
     # Metadata
     # ==========================================================
 
-    created_at: datetime = Field(default_factory=datetime.now())
+    created_at: datetime = Field(default_factory=datetime.now)
 
     author: Optional[str] = None
 
