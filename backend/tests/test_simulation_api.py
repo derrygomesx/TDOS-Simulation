@@ -2,7 +2,7 @@
 Integration tests for the TDOS backend simulation API.
 """
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient # type: ignore
 
 from api import app
 

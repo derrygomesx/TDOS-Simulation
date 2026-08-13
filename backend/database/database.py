@@ -63,6 +63,8 @@ def initialize_database() -> None:
     Creates all database tables.
     """
 
+    from database import models  # noqa: F401
+
     Base.metadata.create_all(bind=engine)
 
 

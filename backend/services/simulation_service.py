@@ -25,15 +25,22 @@ class SimulationService:
     responsive and lifecycle endpoints can inspect or request a pause/stop.
     """
 
+    # The API creates a fresh SimulationService for each request. Keep
+    # simulation runtime state at class level so a simulation created by
+    # POST /simulations can be found by later lifecycle requests such as
+    # GET /simulations/{id}, POST /start, /run, /pause, etc.
+    _lock = RLock()
+    _engines: dict[str, SimulationEngine] = {}
+    _futures: dict[str, Future] = {}
+    _executor = ThreadPoolExecutor(
+        max_workers=4,
+        thread_name_prefix="tdos-simulation",
+    )
+
     def __init__(self, session) -> None:
+        # Database sessions remain request-scoped. Runtime simulation state
+        # is shared above, while DB updates use the current request's session.
         self._session = session
-        self._lock = RLock()
-        self._engines: dict[str, SimulationEngine] = {}
-        self._futures: dict[str, Future] = {}
-        self._executor = ThreadPoolExecutor(
-            max_workers=4,
-            thread_name_prefix="tdos-simulation",
-        )
 
     # ==========================================================
     # CREATE
