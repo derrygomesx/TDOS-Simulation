@@ -50,7 +50,7 @@ jobs:
       - name: Install Package
         run: |
           pip install -e .
-
+`r`n      - name: Install Test Dependencies`r`n        run: |`r`n          python -m pip install pytest
       - name: Run Tests
         run: |
           pytest -v
