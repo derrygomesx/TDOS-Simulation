@@ -1,4 +1,4 @@
-﻿name: TDOS Tests
+name: TDOS Tests
 
 on:
   push:
@@ -6,12 +6,14 @@ on:
       - main
       - master
       - develop
+      - integration
 
   pull_request:
     branches:
       - main
       - master
       - develop
+      - integration
 
 jobs:
   test:
