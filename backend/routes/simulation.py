@@ -95,6 +95,87 @@ def get_simulation_results(simulation_id: str):
         session.close()
 
 
+
+
+@router.get("/{simulation_id}/replay")
+def get_simulation_replay(simulation_id: str):
+    """Return recorded replay frames for the completed simulation."""
+    session, service = _service()
+    try:
+        try:
+            return service.replay(simulation_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
+@router.get("/{simulation_id}/rams")
+def get_simulation_rams(simulation_id: str):
+    """Return RAMS intelligence for the completed simulation."""
+    session, service = _service()
+    try:
+        try:
+            return service.rams(simulation_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
+@router.get("/{simulation_id}/decision-support")
+def get_simulation_decision_support(simulation_id: str):
+    """Return explainable maintenance decisions for the completed simulation."""
+    session, service = _service()
+    try:
+        try:
+            return service.decision_support(simulation_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
+@router.post("/{simulation_id}/maintenance-what-if/batch")
+def maintenance_what_if_batch(simulation_id: str, payload: dict):
+    """Compare multiple non-persistent maintenance intervention scenarios."""
+    session, service = _service()
+    try:
+        scenarios = payload.get("scenarios") if isinstance(payload, dict) else None
+
+        if not isinstance(scenarios, list) or not scenarios:
+            raise HTTPException(
+                status_code=422,
+                detail="At least one maintenance scenario is required.",
+            )
+
+        if len(scenarios) > 12:
+            raise HTTPException(
+                status_code=422,
+                detail="A maximum of 12 maintenance scenarios can be compared at once.",
+            )
+
+        try:
+            return service.maintenance_what_if_batch(
+                simulation_id,
+                scenarios,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
 @router.post(
     "/{simulation_id}/pause",
     response_model=SimulationActionResponse,

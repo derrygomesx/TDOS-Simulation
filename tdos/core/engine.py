@@ -3,52 +3,52 @@ Track Digital Operations Sandbox (TDOS)
 
 engine.py
 
-Integrated simulation runtime for TDOS.
+Core simulation engine responsible for executing TDOS simulations.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from random import Random
-from time import perf_counter
 from uuid import uuid4
 
 from tdos.config.logging import log
 from tdos.config.settings import settings
-from tdos.core.event_bus import Event, EventBus
 from tdos.digital_twin.clone_manager import CloneManager
-from tdos.digital_twin.degradation import DegradationModel
 from tdos.models.asset import RailwayAsset
-from tdos.models.results import AssetResult, PredictionResult, SimulationResult
+from tdos.models.results import (
+    AssetResult,
+    PredictionResult,
+    SimulationResult,
+)
 from tdos.models.scenario import SimulationScenario
 from tdos.models.simulation import SimulationSession
 from tdos.prediction.prediction_engine import PredictionEngine
-from tdos.prediction.risk import RiskPredictor
 from tdos.replay.replay_engine import ReplayEngine
-from tdos.scenarios.registry import registry
-# Import concrete scenarios so their registration side effects run.
-from tdos.scenarios import infrastructure as _infrastructure
-from tdos.scenarios import operations as _operations
-from tdos.scenarios import sensors as _sensors
-from tdos.scenarios import weather as _weather
+from tdos.rams.models import RAMSResult
+from tdos.rams.rams_engine import RAMSEngine
 
 
 class SimulationEngine:
-    """Execute a complete deterministic TDOS simulation."""
+    """
+    Core TDOS Simulation Engine.
+
+    Responsible for orchestrating the complete
+    simulation lifecycle and building the
+    final analytical result.
+    """
 
     def __init__(self) -> None:
         self._session: SimulationSession | None = None
-        self.event_bus = EventBus()
-        self.degradation_model = DegradationModel()
-        self.prediction_engine = PredictionEngine()
-        self.replay_engine = ReplayEngine()
+
+        # Digital Twin management
         self.clone_manager = CloneManager()
-        self._rng = Random()
-        self._scenario_instances = []
-        self._scenario_triggered: dict[str, bool] = {}
-        self._latest_predictions: dict[str, PredictionResult] = {}
-        self._last_result: SimulationResult | None = None
-        self._started_perf = 0.0
+
+        # Simulation replay
+        self.replay_engine = ReplayEngine()
+
+    # ==========================================================
+    # Session Management
+    # ==========================================================
 
     def create_session(
         self,
@@ -57,305 +57,514 @@ class SimulationEngine:
         scenarios: list[SimulationScenario],
         total_steps: int = 1000,
     ) -> SimulationSession:
-        if total_steps <= 0:
-            raise ValueError("total_steps must be greater than zero.")
 
-        asset_ids = [asset.asset_id for asset in assets]
-        if len(asset_ids) != len(set(asset_ids)):
-            raise ValueError("Asset IDs must be unique.")
+        # Start every new simulation with a clean
+        # Digital Twin registry.
+        self.clone_manager.clear()
 
-        scenario_ids = [scenario.scenario_id for scenario in scenarios]
-        if len(scenario_ids) != len(set(scenario_ids)):
-            raise ValueError("Scenario IDs must be unique.")
+        # Start every new simulation with a clean
+        # replay history.
+        self.replay_engine.reset()
+
+        # Create one Digital Twin for every participating asset.
+        self.clone_manager.create_twins(assets)
 
         session = SimulationSession(
             simulation_id=f"SIM-{uuid4().hex[:8].upper()}",
             simulation_name=name,
-            assets=list(assets),
-            scenarios=list(scenarios),
+            assets=assets,
+            scenarios=scenarios,
             total_steps=total_steps,
             status="INITIALIZING",
         )
 
         self._session = session
-        self._last_result = None
-        self._scenario_triggered = {scenario.scenario_id: False for scenario in scenarios}
-        self._rng.seed(session.random_seed)
-        self._scenario_instances = [self._build_scenario(scenario) for scenario in scenarios]
-        self.clone_manager.clear()
-        self.clone_manager.create_twins(session.assets)
-        self._latest_predictions.clear()
 
-        log.info("Simulation created: %s", session.simulation_id)
+        log.info(
+            f"Simulation created: {session.simulation_id}"
+        )
+
+        log.info(
+            f"Digital Twins initialized: "
+            f"{self.clone_manager.count}"
+        )
+
         return session
 
+    # ==========================================================
+    # Run
+    # ==========================================================
+
     def run(self) -> SimulationResult:
+
         if self._session is None:
-            raise RuntimeError("Simulation session not initialized.")
+            raise RuntimeError(
+                "Simulation session not initialized."
+            )
 
-        if self._session.completed:
-            return self._last_result or self._build_result()
+        log.info("Starting simulation...")
 
-        self._started_perf = perf_counter()
         session = self._session.model_copy(
             update={
                 "status": "RUNNING",
-                "paused": False,
-                "completed": False,
                 "started_at": datetime.now(),
             }
         )
+
         self._session = session
+
+        # ------------------------------------------------------
+        # Start replay recording
+        # ------------------------------------------------------
+
         self.replay_engine.start()
-        self.event_bus.publish(Event("START", "simulation_engine", {"simulation_id": session.simulation_id}))
 
-        try:
-            for step in range(session.current_step + 1, session.total_steps + 1):
-                if self._session.paused or self._session.status != "RUNNING":
-                    break
+        # ------------------------------------------------------
+        # Main Simulation Loop
+        # ------------------------------------------------------
 
-                self._tick(step)
+        for step in range(session.total_steps):
 
-            if self._session.status == "RUNNING":
-                finished = datetime.now()
-                self.replay_engine.stop()
-                self._session = self._session.model_copy(
-                    update={
-                        "status": "COMPLETED",
-                        "completed": True,
-                        "paused": False,
-                        "progress": 100.0,
-                        "finished_at": finished,
-                        "replay_frames": self.replay_engine.total_frames,
-                    }
-                )
-                self.event_bus.publish(Event("STOP", "simulation_engine", {"simulation_id": self._session.simulation_id}))
-                self._last_result = self._build_result()
-                log.success("Simulation completed: %s", self._session.simulation_id)
-                return self._last_result
-
-            return self._build_result()
-        except Exception:
-            self.replay_engine.stop()
-            self._session = self._session.model_copy(
-                update={"status": "FAILED", "finished_at": datetime.now()}
-            )
-            self.event_bus.publish(Event("ERROR", "simulation_engine", {"simulation_id": self._session.simulation_id}))
-            raise
-
-    def _tick(self, step: int) -> None:
-        assert self._session is not None
-
-        self._activate_scenarios(step)
-        self._process_events(step)
-        assets = self._update_assets(self._session.assets, step)
-        self._session = self._session.model_copy(
-            update={
-                "current_step": step,
-                "progress": (step / self._session.total_steps) * 100.0,
-                "assets": assets,
-                "assets_updated": self._session.assets_updated + len(assets),
-                "replay_frames": self.replay_engine.total_frames + 1,
-            }
-        )
-        self._execute_predictions(assets)
-        self.replay_engine.record(step, assets)
-        self._session = self._session.model_copy(
-            update={
-                "predictions_generated": self._session.predictions_generated + len(assets),
-                "replay_frames": self.replay_engine.total_frames,
-            }
-        )
-        self.event_bus.publish(
-            Event(
-                "HEALTH_UPDATE",
-                "simulation_engine",
-                {"step": step, "asset_count": len(assets)},
-            )
-        )
-
-    def _process_events(self, step: int) -> None:
-        assert self._session is not None
-        active = sum(1 for scenario in self._scenario_instances if scenario.active)
-        self._session = self._session.model_copy(
-            update={
-                "events_processed": self._session.events_processed + active,
-            }
-        )
-        if active:
-            self.event_bus.publish(Event("SCENARIO", "scenario_engine", {"step": step, "active": active}))
-
-    def _update_assets(self, assets: list[RailwayAsset], step: int) -> list[RailwayAsset]:
-        updated: list[RailwayAsset] = []
-        for asset in assets:
-            current = asset
-            scenario_factor = 1.0
-            environmental_factor = 1.0
-            operational_factor = 1.0
-
-            for scenario in self._scenario_instances:
-                if not scenario.active or not self._scenario_affects(scenario.config, current):
-                    continue
-
-                current = scenario.apply(current)
-                category = scenario.category.upper()
-                if category == "WEATHER":
-                    environmental_factor *= 1.0 + scenario.severity
-                elif category == "OPERATION":
-                    operational_factor *= 1.0 + scenario.severity
-                else:
-                    scenario_factor *= 1.0 + scenario.severity
-
-            current = self.degradation_model.apply(
-                current,
-                scenario_factor=scenario_factor,
-                environmental_factor=environmental_factor,
-                operational_factor=operational_factor,
-            )
-
-            failed = self.degradation_model.asset_failed(current.health_score)
-            current = current.model_copy(
+            session = session.model_copy(
                 update={
-                    "failed": failed,
-                    "active": current.active and not failed,
+                    "current_step": step + 1,
+                    "progress": (
+                        (step + 1)
+                        / session.total_steps
+                    ) * 100,
                 }
             )
-            self.clone_manager.update(current)
-            updated.append(current)
 
-        return updated
+            # --------------------------------------------------
+            # Event processing
+            # --------------------------------------------------
 
-    def _execute_scenarios(self, session: SimulationSession) -> None:
-        # Kept as a compatibility hook for callers that used the original engine.
-        self._activate_scenarios(session.current_step)
+            self._process_events(session)
 
-    def _activate_scenarios(self, step: int) -> None:
-        for scenario in self._scenario_instances:
-            config = scenario.config
-            if not config.enabled:
-                scenario.stop()
-                continue
-            if step == config.start_step and not self._scenario_triggered[config.scenario_id]:
-                self._scenario_triggered[config.scenario_id] = True
-                if self._rng.random() <= config.probability:
-                    scenario.start()
-                    self.event_bus.publish(
-                        Event("SCENARIO", "scenario_engine", {"scenario_id": config.scenario_id, "action": "START"})
-                    )
-            elif step > config.end_step and scenario.active:
-                scenario.stop()
-                self.event_bus.publish(
-                    Event("SCENARIO", "scenario_engine", {"scenario_id": config.scenario_id, "action": "STOP"})
-                )
+            # --------------------------------------------------
+            # Asset state update
+            # --------------------------------------------------
 
-    @staticmethod
-    def _scenario_affects(config: SimulationScenario, asset: RailwayAsset) -> bool:
-        if config.target_asset is not None and asset.asset_id != config.target_asset:
-            return False
-        if config.affected_assets and asset.asset_id not in config.affected_assets:
-            return False
-        return True
+            self._update_assets(session)
 
-    @staticmethod
-    def _build_scenario(config: SimulationScenario):
-        if not registry.exists(config.name):
-            raise ValueError(f"Scenario '{config.name}' is not registered.")
-        return registry.create(config.name, config)
+            # _update_assets() updates self._session because
+            # RailwayAsset is frozen.
+            session = self._session
 
-    def _execute_predictions(self, assets: list[RailwayAsset]) -> None:
-        for asset in assets:
-            self._latest_predictions[asset.asset_id] = self.prediction_engine.predict(asset)
-            self.event_bus.publish(
-                Event("PREDICTION", "prediction_engine", {"asset_id": asset.asset_id})
+            assert session is not None
+
+            # --------------------------------------------------
+            # Scenario execution
+            # --------------------------------------------------
+
+            self._execute_scenarios(session)
+
+            # --------------------------------------------------
+            # Synchronize Digital Twins
+            # --------------------------------------------------
+
+            self.clone_manager.synchronize(
+                session.assets
             )
 
+            # --------------------------------------------------
+            # Record simulation state for replay
+            # --------------------------------------------------
+
+            self.replay_engine.record(
+                session.current_step,
+                session.assets,
+            )
+
+        # ------------------------------------------------------
+        # Stop replay recording
+        # ------------------------------------------------------
+
+        self.replay_engine.stop()
+
+        finished_at = datetime.now()
+
+        session = session.model_copy(
+            update={
+                "status": "COMPLETED",
+                "completed": True,
+                "finished_at": finished_at,
+            }
+        )
+
+        self._session = session
+
+        log.success(
+            "Simulation completed."
+        )
+
+        return self._build_result()
+
+    # ==========================================================
+    # Internal Pipeline
+    # ==========================================================
+
+    def _process_events(
+        self,
+        session: SimulationSession,
+    ) -> None:
+
+        log.debug(
+            f"Step {session.current_step}: "
+            "Processing events."
+        )
+
+    def _update_assets(
+        self,
+        session: SimulationSession,
+    ) -> None:
+        """
+        Applies the configured degradation rate to
+        every active asset for one simulation cycle.
+
+        RailwayAsset is frozen, therefore updated assets
+        are created using model_copy().
+        """
+
+        updated_assets: list[RailwayAsset] = []
+
+        for asset in session.assets:
+
+            # Failed or inactive assets no longer degrade
+            # through the normal operational cycle.
+            if not asset.active or asset.failed:
+
+                updated_assets.append(asset)
+
+                continue
+
+            # degradation_rate is defined by RailwayAsset
+            # as health degradation per simulation cycle.
+            new_health = max(
+                0.0,
+                asset.health_score
+                - asset.degradation_rate,
+            )
+
+            updated_assets.append(
+                asset.model_copy(
+                    update={
+                        "health_score": new_health,
+                        "failed": new_health < 40,
+                    }
+                )
+            )
+
+        updated_session = session.model_copy(
+            update={
+                "assets": updated_assets,
+            }
+        )
+
+        self._session = updated_session
+
+        log.debug(
+            f"Step {session.current_step}: "
+            "Updating assets."
+        )
+
+    def _execute_scenarios(
+        self,
+        session: SimulationSession,
+    ) -> None:
+
+        log.debug(
+            f"Step {session.current_step}: "
+            "Executing scenarios."
+        )
+
+    # ==========================================================
+    # Result Builder
+    # ==========================================================
+
     def _build_result(self) -> SimulationResult:
+
         assert self._session is not None
 
         assets = self._session.assets
+
+        # ------------------------------------------------------
+        # Asset Health Summary
+        # ------------------------------------------------------
+
+        healthy = sum(
+            1
+            for asset in assets
+            if asset.health_score >= 80
+        )
+
+        degraded = sum(
+            1
+            for asset in assets
+            if 40 <= asset.health_score < 80
+        )
+
+        failed = sum(
+            1
+            for asset in assets
+            if asset.health_score < 40
+        )
+
+        average = (
+            sum(
+                asset.health_score
+                for asset in assets
+            )
+            / len(assets)
+            if assets
+            else 0.0
+        )
+
+        # ------------------------------------------------------
+        # Existing TDOS Prediction Engine
+        # ------------------------------------------------------
+
+        prediction_engine = PredictionEngine()
+
         asset_results: list[AssetResult] = []
-        predictions = list(self._latest_predictions.values())
+        predictions: list[PredictionResult] = []
 
         for asset in assets:
-            prediction = self._latest_predictions.get(asset.asset_id) or self.prediction_engine.predict(asset)
-            probability = prediction.failure_probability
+
+            prediction = prediction_engine.predict(
+                asset
+            )
+
+            predictions.append(prediction)
+
+            predicted_risk = (
+                prediction_engine
+                .risk_predictor
+                .risk_level(
+                    prediction.failure_probability
+                )
+            )
+
+            degradation = max(
+                0.0,
+                asset.health_score
+                - prediction.predicted_health_score,
+            )
+
             asset_results.append(
                 AssetResult(
                     asset_id=asset.asset_id,
                     health_score=asset.health_score,
-                    degradation=asset.degradation_rate,
-                    predicted_risk=RiskPredictor.risk_level(probability),
-                    maintenance_required=asset.requires_maintenance,
-                    failed=asset.failed,
+                    degradation=round(
+                        degradation,
+                        3,
+                    ),
+                    predicted_risk=predicted_risk,
+                    maintenance_required=(
+                        asset.requires_maintenance
+                    ),
+                    failed=(
+                        asset.health_score < 40
+                    ),
                 )
             )
 
-        healthy = sum(asset.health_score >= 80 for asset in assets)
-        degraded = sum(40 <= asset.health_score < 80 for asset in assets)
-        failed = sum(asset.health_score < 40 or asset.failed for asset in assets)
-        average = sum(asset.health_score for asset in assets) / len(assets) if assets else 0.0
-        duration = max(0.0, perf_counter() - self._started_perf) if self._started_perf else 0.0
+        # ------------------------------------------------------
+        # Fleet-Level Prediction
+        # ------------------------------------------------------
 
-        aggregate_prediction = None
+        prediction: PredictionResult | None = None
+
         if predictions:
-            aggregate_prediction = PredictionResult(
-                failure_probability=max(p.failure_probability for p in predictions),
-                remaining_useful_life_days=min(p.remaining_useful_life_days for p in predictions),
-                predicted_health_score=sum(p.predicted_health_score for p in predictions) / len(predictions),
-                confidence=sum(p.confidence for p in predictions) / len(predictions),
+
+            prediction = PredictionResult(
+
+                failure_probability=round(
+                    sum(
+                        item.failure_probability
+                        for item in predictions
+                    )
+                    / len(predictions),
+                    3,
+                ),
+
+                remaining_useful_life_days=int(
+                    sum(
+                        item.remaining_useful_life_days
+                        for item in predictions
+                    )
+                    / len(predictions)
+                ),
+
+                predicted_health_score=round(
+                    sum(
+                        item.predicted_health_score
+                        for item in predictions
+                    )
+                    / len(predictions),
+                    2,
+                ),
+
+                confidence=round(
+                    sum(
+                        item.confidence
+                        for item in predictions
+                    )
+                    / len(predictions),
+                    3,
+                ),
             )
 
+        # ------------------------------------------------------
+        # Simulation Duration
+        # ------------------------------------------------------
+
+        duration_seconds = 0.0
+
+        if (
+            self._session.started_at is not None
+            and self._session.finished_at is not None
+        ):
+
+            duration_seconds = max(
+                0.0,
+                (
+                    self._session.finished_at
+                    - self._session.started_at
+                ).total_seconds(),
+            )
+
+        # ------------------------------------------------------
+        # Final Simulation Result
+        # ------------------------------------------------------
+
         return SimulationResult(
-            simulation_id=self._session.simulation_id,
-            simulation_name=self._session.simulation_name,
-            success=self._session.status == "COMPLETED",
-            duration_seconds=duration,
-            simulation_steps=self._session.current_step,
-            scenarios=self._session.scenarios,
+
+            simulation_id=(
+                self._session.simulation_id
+            ),
+
+            simulation_name=(
+                self._session.simulation_name
+            ),
+
+            success=True,
+
+            duration_seconds=duration_seconds,
+
+            simulation_steps=(
+                self._session.total_steps
+            ),
+
+            scenarios=(
+                self._session.scenarios
+            ),
+
             assets=assets,
+
             asset_results=asset_results,
-            prediction=aggregate_prediction,
+
+            prediction=prediction,
+
             benchmark=None,
+
             total_assets=len(assets),
+
             healthy_assets=healthy,
+
             degraded_assets=degraded,
+
             failed_assets=failed,
-            average_health_score=round(average, 3),
+
+            average_health_score=average,
+
             metadata={
                 "engine": settings.engine_name,
                 "version": settings.engine_version,
-                "events_processed": str(self._session.events_processed),
-                "replay_frames": str(self.replay_engine.total_frames),
+                "replay_frames": str(
+                    self.replay_engine.total_frames
+                ),
+                "digital_twins": str(
+                    self.clone_manager.count
+                ),
             },
         )
 
+    # ==========================================================
+    # Public Helpers
+    # ==========================================================
+
     def status(self) -> dict:
+        """
+        Returns the current simulation status.
+        """
+
         if self._session is None:
-            return {"initialized": False, "running": False, "completed": False}
-        return {
-            **self._session.summary(),
-            "initialized": True,
-            "running": self._session.status == "RUNNING",
-            "paused": self._session.paused,
-            "failed": self._session.status == "FAILED",
-        }
+
+            return {
+                "initialized": False,
+                "running": False,
+                "completed": False,
+            }
+
+        status = self._session.summary()
+
+        status["initialized"] = True
+        status["running"] = self._session.status == "RUNNING"
+        status["completed"] = self._session.status == "COMPLETED"
+
+        return status
+
+    def rams(self) -> RAMSResult:
+        """
+        Returns RAMS intelligence derived from the latest simulation result
+        and recorded replay history.
+        """
+
+        result = self.results()
+        return RAMSEngine().analyze(
+            result,
+            self.replay_engine.frames(),
+        )
 
     def results(self) -> SimulationResult:
+        """
+        Returns the latest simulation result.
+        """
+
         if self._session is None:
-            raise RuntimeError("Simulation has not been created.")
-        return self._last_result or self._build_result()
+
+            raise RuntimeError(
+                "Simulation has not been created."
+            )
+
+        return self._build_result()
+
+    # ==========================================================
+    # Utilities
+    # ==========================================================
 
     @property
-    def session(self) -> SimulationSession | None:
+    def session(
+        self,
+    ) -> SimulationSession | None:
+        """
+        Returns the current simulation session.
+        """
+
         return self._session
 
     def reset(self) -> None:
+        """
+        Clears the current simulation.
+        """
+
         self._session = None
-        self._last_result = None
-        self._scenario_instances.clear()
-        self._scenario_triggered.clear()
-        self._latest_predictions.clear()
+
         self.clone_manager.clear()
+
         self.replay_engine.reset()
-        self.event_bus.clear()
-        log.info("Simulation engine reset.")
+
+        log.info(
+            "Simulation engine reset."
+        )

@@ -14,6 +14,7 @@ from threading import RLock
 from database.models import SimulationModel
 from schemas.simulation import SimulationCreateRequest
 from tdos.core.engine import SimulationEngine
+from tdos.decision_support import DecisionSupportEngine
 
 
 class SimulationService:
@@ -154,6 +155,91 @@ class SimulationService:
         self._sync_record(engine)
 
         return result.model_dump(mode="json")
+
+    def rams(self, simulation_id: str) -> dict:
+        """Return RAMS intelligence for a completed simulation."""
+        engine = self._get_engine(simulation_id)
+
+        if engine.session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+
+        if not engine.session.completed:
+            raise RuntimeError("RAMS analysis is available after simulation completion.")
+
+        return engine.rams().model_dump(mode="json")
+
+    # ==========================================================
+    # REPLAY
+    # ==========================================================
+
+    def decision_support(self, simulation_id: str) -> dict:
+        """Return explainable maintenance decisions for a completed simulation."""
+        engine = self._get_engine(simulation_id)
+        if engine.session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+        if not engine.session.completed:
+            raise RuntimeError("Decision support is available after simulation completion.")
+        return DecisionSupportEngine().analyze(engine.rams()).copy()
+
+    def maintenance_what_if(
+        self, simulation_id: str, asset_id: str, health_recovery: float = 15.0,
+        degradation_reduction_percent: float = 30.0,
+    ) -> dict:
+        """Evaluate a non-persistent maintenance intervention scenario."""
+        engine = self._get_engine(simulation_id)
+        if engine.session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+        if not engine.session.completed:
+            raise RuntimeError("Maintenance what-if analysis is available after simulation completion.")
+        return DecisionSupportEngine().what_if(
+            engine.rams(), asset_id, health_recovery, degradation_reduction_percent
+        )
+
+    def maintenance_what_if_batch(self, simulation_id: str, scenarios: list[dict]) -> dict:
+        """Evaluate multiple non-persistent maintenance intervention scenarios."""
+        engine = self._get_engine(simulation_id)
+        if engine.session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+        if not engine.session.completed:
+            raise RuntimeError("Maintenance what-if analysis is available after simulation completion.")
+        if not scenarios:
+            raise ValueError("At least one maintenance scenario is required.")
+        if len(scenarios) > 12:
+            raise ValueError("A maximum of 12 maintenance scenarios can be compared at once.")
+        return DecisionSupportEngine().what_if_batch(engine.rams(), scenarios)
+
+    def replay(self, simulation_id: str) -> dict:
+        """
+        Return the recorded replay timeline for a simulation.
+
+        Each frame is an immutable snapshot captured by ReplayEngine.
+        The response is JSON-ready for frontend analytics.
+        """
+        engine = self._get_engine(simulation_id)
+
+        if engine.session is None:
+            raise KeyError(f"Simulation '{simulation_id}' not found.")
+
+        frames = []
+
+        for frame in engine.replay_engine.frames():
+            frames.append(
+                {
+                    "step": frame.step,
+                    "timestamp": frame.timestamp.isoformat(),
+                    "assets": [
+                        asset.model_dump(mode="json")
+                        for asset in frame.assets
+                    ],
+                }
+            )
+
+        return {
+            "simulation_id": simulation_id,
+            "total_frames": len(frames),
+            "duration_seconds": engine.replay_engine.duration,
+            "frames": frames,
+        }
 
     # ==========================================================
     # CONTROL
