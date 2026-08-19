@@ -1,4 +1,4 @@
-"""
+﻿"""
 Track Digital Operations Sandbox (TDOS)
 
 simulation.py
@@ -22,23 +22,37 @@ class SimulationSession(BaseModel):
     Represents a complete TDOS simulation session.
     """
 
-    model_config = ConfigDict(frozen=True, validate_assignment=True)
+    model_config = ConfigDict(
+        frozen=True,
+        validate_assignment=True,
+    )
 
     # ==========================================================
     # Identity
     # ==========================================================
 
-    simulation_id: str = Field(..., description="Unique simulation identifier.")
+    simulation_id: str = Field(
+        ...,
+        description="Unique simulation identifier.",
+    )
 
-    simulation_name: str = Field(..., description="Simulation name.")
+    simulation_name: str = Field(
+        ...,
+        description="Simulation name.",
+    )
 
-    description: str = Field(default="", description="Simulation description.")
+    description: str = Field(
+        default="",
+        description="Simulation description.",
+    )
 
     # ==========================================================
     # Timing
     # ==========================================================
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now())
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now()
+    )
 
     started_at: Optional[datetime] = None
 
@@ -48,21 +62,38 @@ class SimulationSession(BaseModel):
     # State
     # ==========================================================
 
-    status: str = Field(default="IDLE", description="Current simulation state.")
+    status: str = Field(
+        default="IDLE",
+        description="Current simulation state.",
+    )
 
-    current_step: int = Field(default=0, ge=0)
+    current_step: int = Field(
+        default=0,
+        ge=0,
+    )
 
-    total_steps: int = Field(default=1000, gt=0)
+    total_steps: int = Field(
+        default=1000,
+        gt=0,
+    )
 
-    progress: float = Field(default=0.0, ge=0.0, le=100.0)
+    progress: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+    )
 
     # ==========================================================
     # Simulation Components
     # ==========================================================
 
-    assets: List[RailwayAsset] = Field(default_factory=list)
+    assets: List[RailwayAsset] = Field(
+        default_factory=list,
+    )
 
-    scenarios: List[SimulationScenario] = Field(default_factory=list)
+    scenarios: List[SimulationScenario] = Field(
+        default_factory=list,
+    )
 
     # ==========================================================
     # Runtime
@@ -70,7 +101,10 @@ class SimulationSession(BaseModel):
 
     random_seed: int = 42
 
-    speed_multiplier: float = Field(default=1.0, gt=0)
+    speed_multiplier: float = Field(
+        default=1.0,
+        gt=0,
+    )
 
     paused: bool = False
 
@@ -80,15 +114,30 @@ class SimulationSession(BaseModel):
     # Statistics
     # ==========================================================
 
-    events_processed: int = Field(default=0, ge=0)
+    events_processed: int = Field(
+        default=0,
+        ge=0,
+    )
 
-    assets_updated: int = Field(default=0, ge=0)
+    assets_updated: int = Field(
+        default=0,
+        ge=0,
+    )
 
-    predictions_generated: int = Field(default=0, ge=0)
+    predictions_generated: int = Field(
+        default=0,
+        ge=0,
+    )
 
-    replay_frames: int = Field(default=0, ge=0)
+    replay_frames: int = Field(
+        default=0,
+        ge=0,
+    )
 
-    benchmark_runs: int = Field(default=0, ge=0)
+    benchmark_runs: int = Field(
+        default=0,
+        ge=0,
+    )
 
     # ==========================================================
     # Summary
@@ -97,25 +146,21 @@ class SimulationSession(BaseModel):
     @property
     def asset_count(self) -> int:
         """Returns the number of assets."""
-
         return len(self.assets)
 
     @property
     def scenario_count(self) -> int:
         """Returns the number of scenarios."""
-
         return len(self.scenarios)
 
     @property
     def is_running(self) -> bool:
         """True if the simulation is currently running."""
-
         return self.status == "RUNNING"
 
     @property
     def is_finished(self) -> bool:
         """True if the simulation has completed."""
-
         return self.completed
 
     # ==========================================================

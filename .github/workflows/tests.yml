@@ -6,30 +6,26 @@ on:
       - main
       - master
       - develop
+      - integration
 
   pull_request:
     branches:
       - main
       - master
       - develop
+      - integration
 
 jobs:
-
   test:
-
     runs-on: ubuntu-latest
 
     strategy:
-
       matrix:
-
         python-version:
-
           - "3.12"
           - "3.13"
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -44,22 +40,26 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
       - name: Install Package
         run: |
-          pip install -e .
+          python -m pip install -e .
+
+      - name: Install Test Dependencies
+        run: |
+          python -m pip install pytest
 
       - name: Run Tests
         run: |
-          pytest -v
+          python -m pytest -v
 
       - name: Display Success
         if: success()
         run: |
-          echo "✅ All TDOS tests passed."
+          echo "All TDOS tests passed."
 
       - name: Display Failure
         if: failure()
         run: |
-          echo "❌ TDOS tests failed."
+          echo "TDOS tests failed."
